@@ -772,40 +772,35 @@ _EOF_
     outputn "Cleaning up cloud-init files"
     rm -f $USER_DATA $META_DATA $CI_ISO && ok
 
-    virsh dumpxml ${VMNAME} | awk -F\' '/mac address/ {print $2}' | while read MAC
-    do
-        output "MAC address: ${MAC}"
-    done
-    
-    if [ -n "${NETWORK_NAME}" ]; then
-        for net in "${NETWORK_NAME[@]}"; do
-            BRIDGE=$(virsh net-info "${net}" | awk -F':' '/Bridge/ {print $2}' | tr -d ' ')
-            if [ -f "/var/lib/libvirt/dnsmasq/${BRIDGE}.status" ]
-            then
-                outputn "Waiting for domain to get an IP address"
-                while true
-                do
-                    IP=$(grep -B1 $MAC /var/lib/libvirt/dnsmasq/$BRIDGE.status | head \
-                        -n 1 | awk '{print $2}' | sed -e s/\"//g -e s/,//)
-                    if [ "$IP" = "" ]
-                    then
-                        sleep 1
-                    else
-                        ok
-                        break
-                    fi
-                done
-                printf "\n"
-                check_delete_known_host
-            else
-                outputn "Bridge looks like a layer 2 bridge, get the domain's IP address from your DHCP server"
-                IP="<IP address>"
-            fi
-        done
-    fi
+    while read DEV MAC BRIDGE; do
+        output "MAC address (${DEV} on bridge ${BRIDGE}): ${MAC}"
+        if [ -f "/var/lib/libvirt/dnsmasq/${BRIDGE}.status" ]
+        then
+            outputn "Waiting for domain to get an IP address on interface ${DEV}"
+            while true
+            do
+                IP=$(grep -B1 $MAC /var/lib/libvirt/dnsmasq/$BRIDGE.status | head \
+                    -n 1 | awk '{print $2}' | sed -e s/\"//g -e s/,//)
+                if [ "$IP" = "" ]
+                then
+                    sleep 0.5
+                else
+                    ok
+                    break
+                fi
+            done
+            check_delete_known_host
+        else
+            output "Bridge ${BRIDGE} looks like a layer 2 bridge, get the domain's IP address from your DHCP server"
+            IP="<IP address>"
+        fi
+        IPS+=("${IP}")
+        printf "\n"
+    done < <( virsh dumpxml ${VMNAME} | xmlstarlet sel -t -m '//interface[mac/@address][target/@dev][source/@bridge]' -v 'concat(target/@dev, " ", mac/@address, " ", source/@bridge)' --nl )
 
-    printf "\n"
-    output "SSH to ${VMNAME}: 'ssh ${LOGIN_USER}@${IP}' or 'ssh ${LOGIN_USER}@${VMNAME}'"
+    for ipaddr in "${IPS[@]}"; do
+        output "SSH to ${VMNAME}: 'ssh ${LOGIN_USER}@${ipaddr}' or 'ssh ${LOGIN_USER}@${VMNAME}'"
+    done
     CONSOLE=$(virsh domdisplay ${VMNAME})
     # Workaround because VNC port number shown by virsh domdisplay is offset from 5900
     if [ "${GRAPHICS}" = 'vnc' ]
